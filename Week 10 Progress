@@ -1,0 +1,224 @@
+final commented code: 
+#include <webots/robot.h>
+#include <webots/distance_sensor.h>
+#include <webots/motor.h>
+#include <webots/gps.h>
+#include <webots/light_sensor.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <math.h>
+
+#define TIME_STEP 64
+#define MAX_SPEED 6.28
+#define WALL_THRESHOLD 80.0 // distance threshold for wall detection
+#define POSITION_THRESHOLD 0.1 // tolerance for reaching a position
+#define VISITED_THRESHOLD 0.2 // threshold to consider a position "visited"
+
+#define NUM_DISTANCE_SENSORS 8
+#define NUM_LIGHT_SENSORS 4
+#define MAX_VISITED_POINTS 100
+#define MAX_DEAD_ENDS 20
+
+#define LIGHT_INTENSITY_THRESHOLD 3261 // light intensity to stop robot
+
+typedef struct {
+  double x, y;
+  double light_intensity;
+} Point;
+
+// function prototypes
+void initialize_devices(WbDeviceTag *ps, WbDeviceTag *left_motor, WbDeviceTag *right_motor, WbDeviceTag *gps, WbDeviceTag *light_sensors);
+void set_motor_speeds(WbDeviceTag left_motor, WbDeviceTag right_motor, double left_speed, double right_speed);
+void read_distance_sensors(WbDeviceTag *ps, double *ps_values);
+bool is_position_visited(Point *visited, int visited_count, Point current);
+void record_position(Point *visited, int *visited_count, Point current);
+Point get_robot_position(WbDeviceTag gps);
+Point get_brightest_dead_end(Point *dead_ends, int dead_end_count);
+
+int main() {
+  wb_robot_init();
+
+  // device handles for sensors and motors
+  WbDeviceTag ps[NUM_DISTANCE_SENSORS], left_motor, right_motor, gps, light_sensors[NUM_LIGHT_SENSORS];
+  initialize_devices(ps, &left_motor, &right_motor, &gps, light_sensors);
+
+  // sensor values storage
+  double ps_values[NUM_DISTANCE_SENSORS];
+  double light_intensities[NUM_LIGHT_SENSORS];
+  double left_speed, right_speed;
+
+  // arays for visited positions and dead-ends
+  Point visited[MAX_VISITED_POINTS];
+  int visited_count = 0;
+  Point dead_ends[MAX_DEAD_ENDS];
+  int dead_end_count = 0;
+
+  // counter for light intensity threshold crossings
+  int light_intensity_cross_count = 0;
+
+  while (wb_robot_step(TIME_STEP) != -1) {
+    // get robot's current position
+    Point current_position = get_robot_position(gps);
+
+    // check if this position has already been visited
+    if (!is_position_visited(visited, visited_count, current_position)) {
+      // record position if it's new
+      record_position(visited, &visited_count, current_position);
+      printf("visited new position: (%.2f, %.2f)\n", current_position.x, current_position.y);
+    }
+
+    // read distance sensor values
+    read_distance_sensors(ps, ps_values);
+
+    // calculate average light intensity from all light sensrs
+    double total_light_intensity = 0.0;
+    for (int i = 0; i < NUM_LIGHT_SENSORS; i++) {
+      light_intensities[i] = wb_light_sensor_get_value(light_sensors[i]);
+      total_light_intensity += light_intensities[i];
+    }
+    double average_light_intensity = total_light_intensity / NUM_LIGHT_SENSORS;
+    printf("Position: (%.2f, %.2f), Light Intensity: %.2f\n", current_position.x, current_position.y, average_light_intensity);
+
+    // check if the light intensity has crossed the threshold
+    if (average_light_intensity >= LIGHT_INTENSITY_THRESHOLD) {
+      light_intensity_cross_count++;
+      // stop the robot aftr crossing the threshold twice
+      if (light_intensity_cross_count == 700) {
+        printf("Light intensity threshold reached second time. Stopping robot.\n");
+        set_motor_speeds(left_motor, right_motor, 0.0, 0.0);
+        break; // stop the exploration
+      }
+    }
+
+    // wall-following logic (right-hand rule)
+    bool front_obstacle = ps_values[2] > WALL_THRESHOLD || ps_values[3] > WALL_THRESHOLD;
+    bool right_obstacle = ps_values[0] > WALL_THRESHOLD || ps_values[1] > WALL_THRESHOLD;
+    bool right_side_obstacle = ps_values[0] > WALL_THRESHOLD;
+    bool left_obstacle = ps_values[5] > WALL_THRESHOLD || ps_values[6] > WALL_THRESHOLD;
+
+    left_speed = MAX_SPEED;
+    right_speed = MAX_SPEED;
+
+    // no obstacles on the front or right, turn right
+    if (!right_side_obstacle && !right_obstacle && !front_obstacle) {
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED * 0.5;
+    } 
+    // move straight if there's a wall on the right but no obstacles ahead
+    else if (!front_obstacle && right_side_obstacle) {
+      left_speed = MAX_SPEED;
+      right_speed = MAX_SPEED;
+    } 
+    // turn left if there's an obstacle ahead and a wall on the right
+    else if (front_obstacle && right_side_obstacle) {
+      left_speed = -MAX_SPEED * 0.5;
+      right_speed = MAX_SPEED;
+    } 
+    // turn right at a dead-end and record the dead-end position
+    else if (front_obstacle && !right_obstacle) {
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED * 0.5;
+
+      if (dead_end_count < MAX_DEAD_ENDS) {
+        dead_ends[dead_end_count] = current_position;
+        dead_ends[dead_end_count].light_intensity = average_light_intensity;
+        dead_end_count++;
+      }
+    } 
+    // turn around if completely blocked on both sides
+    else if (left_obstacle && front_obstacle) {
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED;
+    }
+
+    // set the motor speeds based on logic above
+    set_motor_speeds(left_motor, right_motor, left_speed, right_speed);
+
+    // once exploration is complete, return to the brightest dead-end
+    if (visited_count >= MAX_VISITED_POINTS) {
+      Point brightest_dead_end = get_brightest_dead_end(dead_ends, dead_end_count);
+      printf("Brightest Dead-End: Position (%.2f, %.2f), Light Intensity: %.2f\n",
+             brightest_dead_end.x, brightest_dead_end.y, brightest_dead_end.light_intensity);
+      break; // stop the simulation
+    }
+  }
+
+  wb_robot_cleanup();
+  return 0;
+}
+
+// initialize all devices (sensors + motors)
+void initialize_devices(WbDeviceTag *ps, WbDeviceTag *left_motor, WbDeviceTag *right_motor, WbDeviceTag *gps, WbDeviceTag *light_sensors) {
+  // initialize distance sensors
+  char ps_names[NUM_DISTANCE_SENSORS][4] = {"ps0", "ps1", "ps2", "ps3", "ps4", "ps5", "ps6", "ps7"};
+  for (int i = 0; i < NUM_DISTANCE_SENSORS; i++) {
+    ps[i] = wb_robot_get_device(ps_names[i]);
+    wb_distance_sensor_enable(ps[i], TIME_STEP);
+  }
+
+  // initialze motors
+  *left_motor = wb_robot_get_device("left wheel motor");
+  *right_motor = wb_robot_get_device("right wheel motor");
+  wb_motor_set_position(*left_motor, INFINITY);
+  wb_motor_set_position(*right_motor, INFINITY);
+
+  // initialize GPS
+  *gps = wb_robot_get_device("gps");
+  wb_gps_enable(*gps, TIME_STEP);
+
+  // initialize light sensor
+  char light_sensor_names[NUM_LIGHT_SENSORS][4] = {"ls0", "ls1", "ls2", "ls3"};
+  for (int i = 0; i < NUM_LIGHT_SENSORS; i++) {
+    light_sensors[i] = wb_robot_get_device(light_sensor_names[i]);
+    wb_light_sensor_enable(light_sensors[i], TIME_STEP);
+  }
+}
+
+// set motor speeds
+void set_motor_speeds(WbDeviceTag left_motor, WbDeviceTag right_motor, double left_speed, double right_speed) {
+  wb_motor_set_velocity(left_motor, left_speed);
+  wb_motor_set_velocity(right_motor, right_speed);
+}
+
+// read distance sensor values
+void read_distance_sensors(WbDeviceTag *ps, double *ps_values) {
+  for (int i = 0; i < NUM_DISTANCE_SENSORS; i++) {
+    ps_values[i] = wb_distance_sensor_get_value(ps[i]);
+  }
+}
+
+// check if position has been visited before
+bool is_position_visited(Point *visited, int visited_count, Point current) {
+  for (int i = 0; i < visited_count; i++) {
+    double distance = hypot(visited[i].x - current.x, visited[i].y - current.y);
+    if (distance < VISITED_THRESHOLD) {
+      return true; // position has been visited
+    }
+  }
+  return false; // place not visited
+}
+
+// record the current position as visited
+void record_position(Point *visited, int *visited_count, Point current) {
+  if (*visited_count < MAX_VISITED_POINTS) {
+    visited[*visited_count] = current;
+    (*visited_count)++;
+  }
+}
+
+// get robot's current GPS position
+Point get_robot_position(WbDeviceTag gps) {
+  const double *gps_values = wb_gps_get_values(gps);
+  return (Point){gps_values[0], gps_values[1]};
+}
+
+// find the brightest dead-end based on light intensity
+Point get_brightest_dead_end(Point *dead_ends, int dead_end_count) {
+  Point brightest = dead_ends[0];
+  for (int i = 1; i < dead_end_count; i++) {
+    if (dead_ends[i].light_intensity > brightest.light_intensity) {
+      brightest = dead_ends[i]; // update to brightst dead-end
+    }
+  }
+  return brightest;
+}
