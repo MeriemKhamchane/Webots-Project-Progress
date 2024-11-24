@@ -1,0 +1,170 @@
+Hard codded taget code: 
+#include <webots/robot.h>
+#include <webots/distance_sensor.h>
+#include <webots/motor.h>
+#include <webots/gps.h>
+#include <webots/light_sensor.h>  // Include the light sensor header file
+#include <stdbool.h>
+#include <math.h>  // For calculating distances
+
+#define TIME_STEP 64
+#define MAX_SPEED 6.28
+#define WALL_THRESHOLD 80.0  // Distance sensor threshold for wall detection
+
+// Target position coordinates
+#define TARGET_X 0.184
+#define TARGET_Y -0.697
+#define TARGET_Z 0.0002
+#define POSITION_THRESHOLD 0.1  // The tolerance for reaching the target position
+
+// Define the number of light sensors
+#define NUM_LIGHT_SENSORS 4
+
+int main(int argc, char **argv) {
+  // Initialize the Webots API
+  wb_robot_init();
+
+  // Internal variables
+  int i;
+  WbDeviceTag ps[8];
+  char ps_names[8][4] = {
+    "ps0", "ps1", "ps2", "ps3",
+    "ps4", "ps5", "ps6", "ps7"
+  };
+
+  // Initialize devices (distance sensors)
+  for (i = 0; i < 8; i++) {
+    ps[i] = wb_robot_get_device(ps_names[i]);
+    wb_distance_sensor_enable(ps[i], TIME_STEP);
+  }
+
+  // Initialize motors
+  WbDeviceTag left_motor = wb_robot_get_device("left wheel motor");
+  WbDeviceTag right_motor = wb_robot_get_device("right wheel motor");
+  wb_motor_set_position(left_motor, INFINITY);
+  wb_motor_set_position(right_motor, INFINITY);
+  wb_motor_set_velocity(left_motor, 0.0);
+  wb_motor_set_velocity(right_motor, 0.0);
+
+  // Initialize GPS sensor
+  WbDeviceTag gps = wb_robot_get_device("gps");
+  wb_gps_enable(gps, TIME_STEP);
+
+  // Initialize light sensors
+  WbDeviceTag light_sensors[NUM_LIGHT_SENSORS];
+  char light_sensor_names[NUM_LIGHT_SENSORS][4] = {"ls0", "ls1", "ls2", "ls3"};
+  
+  // Enable the light sensors
+  for (i = 0; i < NUM_LIGHT_SENSORS; i++) {
+    light_sensors[i] = wb_robot_get_device(light_sensor_names[i]);
+    wb_light_sensor_enable(light_sensors[i], TIME_STEP);
+  }
+
+  // Array to store light intensities
+  double light_intensities[NUM_LIGHT_SENSORS];
+
+  // Variables to track the highest light intensity and its position
+  double max_light_intensity = -1.0;  // Initializing to a value smaller than any possible light intensity
+  double best_x = 0.0, best_y = 0.0, best_z = 0.0;  // Position for the highest light intensity
+
+  // Counter to track the number of times the target position is encountered
+  int target_encounter_count = 0;
+
+  // Feedback loop: Step simulation until an exit event is received
+  while (wb_robot_step(TIME_STEP) != -1) {
+    // Get the current position of the robot
+    const double *position = wb_gps_get_values(gps);
+    double x = position[0];
+    double y = position[1];
+    double z = position[2];
+
+    // Check if the robot is at the target position
+    double distance_to_target = sqrt(pow(x - TARGET_X, 2) + pow(y - TARGET_Y, 2) + pow(z - TARGET_Z, 2));
+    if (distance_to_target < POSITION_THRESHOLD) {
+      target_encounter_count++;
+
+      // Stop the robot if it's the second time reaching the target position
+      if (target_encounter_count == 100) {
+        printf("Target reached for the second time. Stopping the robot.\n");
+        wb_motor_set_velocity(left_motor, 0.0);
+        wb_motor_set_velocity(right_motor, 0.0);
+        break;  // Exit the loop
+      }
+    }
+
+    // Read light sensor values
+    for (i = 0; i < NUM_LIGHT_SENSORS; i++) {
+      light_intensities[i] = wb_light_sensor_get_value(light_sensors[i]);
+    }
+
+    // Find the sensor with the highest light intensity
+    for (i = 0; i < NUM_LIGHT_SENSORS; i++) {
+      if (light_intensities[i] > max_light_intensity) {
+        max_light_intensity = light_intensities[i];
+        best_x = x;  // Store the robot's position when the highest light intensity is found
+        best_y = y;
+        best_z = z;
+      }
+    }
+
+    // Print the light intensities for debugging
+    printf("Light Intensities: ");
+    for (i = 0; i < NUM_LIGHT_SENSORS; i++) {
+      printf("%f ", light_intensities[i]);
+    }
+    printf("\n");
+
+    // Optionally, print the position with the highest light intensity
+    printf("Highest light intensity at position: (%f, %f, %f)\n", best_x, best_y, best_z);
+
+    // Read sensor outputs for distance sensors
+    double ps_values[8];
+    for (i = 0; i < 8; i++) {
+      ps_values[i] = wb_distance_sensor_get_value(ps[i]);
+    }
+
+    // Detect obstacles
+    bool front_obstacle = ps_values[2] > WALL_THRESHOLD || ps_values[3] > WALL_THRESHOLD;
+    bool right_obstacle = ps_values[0] > WALL_THRESHOLD || ps_values[1] > WALL_THRESHOLD;
+    bool right_side_obstacle = ps_values[0] > WALL_THRESHOLD; // Right-most sensor to track the wall
+    bool left_obstacle = ps_values[5] > WALL_THRESHOLD || ps_values[6] > WALL_THRESHOLD;
+
+    // Initialize motor speeds to move straight
+    double left_speed = MAX_SPEED;
+    double right_speed = MAX_SPEED;
+
+    // Wall-hugging logic (Right-hand rule)
+    if (!right_side_obstacle && !right_obstacle && !front_obstacle) {
+      // If no obstacle to the right and ahead, turn right
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED * 0.5;
+    } else if (!front_obstacle && right_side_obstacle) {
+      // If no obstacle ahead and there's a wall to the right, go straight
+      left_speed = MAX_SPEED;
+      right_speed = MAX_SPEED;
+    } else if (front_obstacle && right_side_obstacle) {
+      // If obstacle ahead but wall on the right, turn left
+      left_speed = -MAX_SPEED * 0.5;
+      right_speed = MAX_SPEED;
+    } else if (front_obstacle && !right_obstacle) {
+      // Dead end or obstacle ahead, turn right
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED * 0.5;
+    } else if (left_obstacle && front_obstacle) {
+      // Completely blocked (dead end), turn around
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED;
+    }
+
+    // Write actuators inputs
+    wb_motor_set_velocity(left_motor, left_speed);
+    wb_motor_set_velocity(right_motor, right_speed);
+  }
+
+  // Final output: Display the location of the highest light intensity
+  printf("The location with the highest light intensity was at: (%f, %f, %f)\n", best_x, best_y, best_z);
+
+  // Cleanup the Webots API
+  wb_robot_cleanup();
+  return 0; // EXIT_SUCCESS
+}
