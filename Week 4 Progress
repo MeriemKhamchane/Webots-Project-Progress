@@ -1,0 +1,86 @@
+The robot moves through the maze but doesnt stop
+#include <webots/robot.h>
+#include <webots/distance_sensor.h>
+#include <webots/motor.h>
+#include <stdbool.h>
+
+#define TIME_STEP 64
+#define MAX_SPEED 6.28
+#define WALL_THRESHOLD 80.0  // Distance sensor threshold for wall detection
+
+int main(int argc, char **argv) {
+  // Initialize the Webots API
+  wb_robot_init();
+
+  // Internal variables
+  int i;
+  WbDeviceTag ps[8];
+  char ps_names[8][4] = {
+    "ps0", "ps1", "ps2", "ps3",
+    "ps4", "ps5", "ps6", "ps7"
+  };
+
+  // Initialize devices (distance sensors)
+  for (i = 0; i < 8; i++) {
+    ps[i] = wb_robot_get_device(ps_names[i]);
+    wb_distance_sensor_enable(ps[i], TIME_STEP);
+  }
+
+  // Initialize motors
+  WbDeviceTag left_motor = wb_robot_get_device("left wheel motor");
+  WbDeviceTag right_motor = wb_robot_get_device("right wheel motor");
+  wb_motor_set_position(left_motor, INFINITY);
+  wb_motor_set_position(right_motor, INFINITY);
+  wb_motor_set_velocity(left_motor, 0.0);
+  wb_motor_set_velocity(right_motor, 0.0);
+
+  // Feedback loop: Step simulation until an exit event is received
+  while (wb_robot_step(TIME_STEP) != -1) {
+    // Read sensor outputs
+    double ps_values[8];
+    for (i = 0; i < 8; i++) {
+      ps_values[i] = wb_distance_sensor_get_value(ps[i]);
+    }
+
+    // Detect obstacles
+    bool front_obstacle = ps_values[2] > WALL_THRESHOLD || ps_values[3] > WALL_THRESHOLD;
+    bool right_obstacle = ps_values[0] > WALL_THRESHOLD || ps_values[1] > WALL_THRESHOLD;
+    bool right_side_obstacle = ps_values[0] > WALL_THRESHOLD; // Right-most sensor to track the wall
+    bool left_obstacle = ps_values[5] > WALL_THRESHOLD || ps_values[6] > WALL_THRESHOLD;
+
+    // Initialize motor speeds to move straight
+    double left_speed = MAX_SPEED;
+    double right_speed = MAX_SPEED;
+
+    // Wall-hugging logic (Right-hand rule)
+    if (!right_side_obstacle && !right_obstacle && !front_obstacle) {
+      // If no obstacle to the right and ahead, turn right
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED * 0.5;
+    } else if (!front_obstacle && right_side_obstacle) {
+      // If no obstacle ahead and there's a wall to the right, go straight
+      left_speed = MAX_SPEED;
+      right_speed = MAX_SPEED;
+    } else if (front_obstacle && right_side_obstacle) {
+      // If obstacle ahead but wall on the right, turn left
+      left_speed = -MAX_SPEED * 0.5;
+      right_speed = MAX_SPEED;
+    } else if (front_obstacle && !right_obstacle) {
+      // Dead end or obstacle ahead, turn right
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED * 0.5;
+    } else if (left_obstacle && front_obstacle) {
+      // Completely blocked (dead end), turn around
+      left_speed = MAX_SPEED;
+      right_speed = -MAX_SPEED;
+    }
+
+    // Write actuators inputs
+    wb_motor_set_velocity(left_motor, left_speed);
+    wb_motor_set_velocity(right_motor, right_speed);
+  }
+
+  // Cleanup the Webots API
+  wb_robot_cleanup();
+  return 0; // EXIT_SUCCESS
+}
